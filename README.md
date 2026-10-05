@@ -90,9 +90,23 @@ Managing LLM calls across providers gets complicated fast — different SDKs, au
 uv add litellm
 ```
 
-Optional features have separate installation extras. Use `litellm[aws]` for AWS SDK authentication and signing, `litellm[tokenizers]` for Hugging Face tokenizers, or `litellm[validation]` for local JSON Schema response validation. `litellm[sdk-extras]` includes all three
+Optional features have separate installation extras. Use `litellm[aws]` for AWS SDK authentication and signing, `litellm[tokenizers]` for Hugging Face tokenizers, or `litellm[validation]` for local JSON Schema response validation. `litellm[sdk-extras]` includes these and the optional capabilities below
 
 Install `litellm[cli]` for the `lite` and `litellm-proxy` client commands, or `litellm[proxy]` for the gateway, its `litellm` command, and dashboard. The proxy extra includes SDK extras and client CLI dependencies
+
+
+| Capability | Install | What it provides |
+| --- | --- | --- |
+| Integration configuration | `pip install 'litellm[integrations]'` | OpenTelemetry settings, Langfuse/Lunary version checks, and CyberArk YAML policies. Vendor SDKs keep their existing separate installation requirements |
+| Prompt rendering | `pip install 'litellm[prompts]'` | Sandboxed Jinja templates and YAML prompt frontmatter for Dotprompt, GitLab, Bitbucket, and Arize Phoenix |
+| Brave search | `pip install 'litellm[search]'` | Existing flexible date normalization for Brave search results |
+| Environment files | `pip install 'litellm[dotenv]'` | Existing automatic `.env` loading in DEV mode |
+
+Template-backed inference also needs `[prompts]`: Hugging Face chat templates, Watsonx GPT-OSS, and provider/model routes that use the shared prompt factory's Jinja path (including applicable vLLM, Triton, Replicate, Predibase, Hugging Face embedding, Codestral, and Petals modes). Built-in non-Jinja templates remain core. `[aws]` includes `[prompts]` for Bedrock and SageMaker template-backed modes. Missing rendering support raises an installation error instead of silently sending a different prompt
+
+`[sdk-extras]` and `[proxy]` include all four capabilities. `[cli]` explicitly retains YAML, version checks, and environment-file loading. Existing installations with those dependencies continue to work; selecting an optional operation without its dependency reports the capability and installation command
+
+Without python-dotenv, core reads supplied arguments and process environment variables and skips `.env` files. With it installed, `LITELLM_MODE=DEV` (the default) retains automatic discovery and lets existing environment values win. `LITELLM_MODE=PRODUCTION` does not auto-load files. Proxy `--reload` retains `LITELLM_DEV_ENV_HOT_RELOAD=True`, which lets file values override inherited values; requesting that reload behavior without dotenv raises installation guidance. For explicit SDK loading, install `[dotenv]` and call `from dotenv import load_dotenv; load_dotenv()` before importing LiteLLM. python-dotenv's supported loading opt-outs remain unchanged
 
 When upgrading, select the extras your application uses. An ordinary upgrade leaves previously installed dependencies in place; use a fresh environment or re-sync your environment to realize the smaller core installation
 
