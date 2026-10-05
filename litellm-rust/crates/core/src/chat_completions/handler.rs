@@ -20,12 +20,16 @@ use crate::{
 pub(super) async fn execute(
     http: &Client,
     auth: &AuthServices,
-    request: ProviderChatCompletionsRequest,
+    request: (
+        ProviderChatCompletionsRequest,
+        litellm_cache_response::CacheKeyInput,
+    ),
     cache: Option<litellm_cache_response::ScopedCache>,
     cache_options: Option<litellm_cache_response::CachePolicy>,
     interceptors: &impl Interceptors<Error>,
     observers: Option<&ObservationSender>,
 ) -> Result<ChatCompletionsResponse, Error> {
+    let (request, cache_input) = request;
     let ProviderChatCompletionsRequest {
         model,
         custom_llm_provider,
@@ -50,19 +54,18 @@ pub(super) async fn execute(
         model: context.model.clone(),
         provider: context.custom_llm_provider.clone(),
     };
-    let wire = interceptors
-        .before_provider_request(
-            WireRequest {
-                url,
-                headers: authenticated.headers,
-                body,
-            },
-            context,
-        )
-        .await?;
     let cache = cache.filter(|_| authenticated.signer.is_none());
+    let outbound = WireRequest {
+        url,
+        headers: authenticated.headers,
+        body,
+    };
+    let original = cache.as_ref().map(|_| outbound.clone());
+    let wire = interceptors
+        .before_provider_request(outbound, context)
+        .await?;
     let cache_request =
-        crate::caching::CacheRequest::from_wire(identity, cache.as_ref().map(|_| &wire));
+        crate::caching::CacheRequest::from_logical(identity, cache_input, original.as_ref(), &wire);
     crate::caching::execute_unary::<super::route::ChatCompletions, _, _>(
         cache_request,
         cache.as_ref().map(|cache| cache.service.clone()),
@@ -249,7 +252,10 @@ mod tests {
         execute(
             &Client::plain_for_test(),
             &AuthServices::default(),
-            prepared(&upstream.uri()),
+            (
+                prepared(&upstream.uri()),
+                litellm_cache_response::CacheKeyInput::default(),
+            ),
             None,
             None,
             &interceptors,
@@ -290,7 +296,10 @@ mod tests {
         let error = execute(
             &Client::plain_for_test(),
             &AuthServices::default(),
-            prepared(&upstream.uri()),
+            (
+                prepared(&upstream.uri()),
+                litellm_cache_response::CacheKeyInput::default(),
+            ),
             None,
             None,
             &interceptors,

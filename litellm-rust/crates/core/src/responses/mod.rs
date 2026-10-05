@@ -1,3 +1,4 @@
+use crate::caching::CacheKeyProjection;
 pub use crate::error::RouteError as Error;
 use litellm_host::observation::ObservationSender;
 pub mod websocket;
@@ -89,13 +90,19 @@ impl ResponsesRoute {
         interceptors: &impl Interceptors<Error>,
         observers: Option<&ObservationSender>,
     ) -> Result<ResponsesOutput, Error> {
+        let cache_input = self
+            .cache
+            .as_ref()
+            .map(|_| call.cache_key_input())
+            .transpose()?
+            .unwrap_or_default();
         let request = prepare::prepare(call, self.secrets.as_ref()).await?;
         crate::diagnostic::provider(&request.context.model, &request.context.custom_llm_provider);
         let execute: futures_util::future::BoxFuture<'_, Result<ResponsesOutput, Error>> =
             Box::pin(handler::execute(
                 &self.http,
                 &self.auth,
-                request,
+                (request, cache_input),
                 self.cache.clone(),
                 cache_options,
                 interceptors,

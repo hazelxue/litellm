@@ -12,6 +12,7 @@ use crate::{caching::CallCache, context::CallContext};
 use litellm_secrets::source::SecretSource;
 use std::sync::Arc;
 
+use crate::caching::CacheKeyProjection;
 pub use crate::error::RouteError as Error;
 pub use types::{MessagesCall, MessagesCallResponse, MessagesShaping, messages_body};
 
@@ -70,15 +71,27 @@ impl MessagesRoute {
         context: CallContext<'_, impl Interceptors<Error>>,
     ) -> Result<MessagesCallResponse, Error> {
         crate::diagnostic::call(async {
+            let cache_input = self
+                .cache
+                .as_ref()
+                .map(|_| call.cache_key_input())
+                .transpose()?
+                .unwrap_or_default();
             let prepared = prepare::prepare(call, self.secrets.as_ref()).await?;
             crate::diagnostic::provider(&prepared.body.model, prepared.provider.as_str());
             let request = self.prepare_outbound(prepared, &context).boxed().await?;
-            let cache = CallCache::<route::Messages>::from_wire(
+            let cache = CallCache::<route::Messages>::prepare(
                 self.cache.as_ref().filter(|_| request.cacheable()),
                 context.cache,
-                &request.identity,
-                &request.wire,
-            );
+                crate::caching::CacheRequest::from_logical(
+                    request.identity.clone(),
+                    cache_input,
+                    request.original.as_ref(),
+                    &request.wire,
+                )
+                .input,
+            )
+            .await;
             let identity = request.identity.clone();
             let (output, source) = match cache.lookup().await {
                 Some(hit) => hit,

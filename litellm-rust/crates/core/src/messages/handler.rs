@@ -24,6 +24,7 @@ use crate::{constants::MESSAGES_TIMEOUT_SECS, context::CallContext, outbound::ou
 pub(super) struct ProviderCall {
     pub identity: ProviderIdentity,
     pub wire: WireRequest,
+    pub original: Option<WireRequest>,
     provider: super::common_utils::MessagesProvider,
     signer: Option<litellm_auth_aws::SigV4Signer>,
     timeout: Option<Duration>,
@@ -63,16 +64,19 @@ impl MessagesRoute {
             model: request_context.model.clone(),
             provider: request_context.custom_llm_provider.clone(),
         };
+        let outbound = WireRequest {
+            url,
+            headers: authenticated.headers,
+            body: serde_json::to_value(&body).map_err(serialize_failure)?,
+        };
+        let original = self
+            .cache
+            .as_ref()
+            .filter(|_| authenticated.signer.is_none() && context.cache.enabled())
+            .map(|_| outbound.clone());
         let wire = context
             .interceptors
-            .before_provider_request(
-                WireRequest {
-                    url,
-                    headers: authenticated.headers,
-                    body: serde_json::to_value(&body).map_err(serialize_failure)?,
-                },
-                request_context,
-            )
+            .before_provider_request(outbound, request_context)
             .await?;
         let stream = match wire.body.get("stream") {
             None | Some(Value::Null) => false,
@@ -89,6 +93,7 @@ impl MessagesRoute {
         };
         Ok(ProviderCall {
             identity,
+            original,
             wire,
             provider,
             signer: authenticated.signer,
@@ -104,6 +109,7 @@ impl MessagesRoute {
     ) -> Result<MessagesCallResponse, Error> {
         let ProviderCall {
             identity,
+            original: _,
             wire,
             provider,
             signer,

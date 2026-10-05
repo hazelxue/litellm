@@ -35,11 +35,11 @@ fn run_messages(
             Ok(litellm_host::call::hosted_call(
                 request,
                 None,
-                move |(call, selection): (_, crate::cache::Selection),
+                move |(call, selection): (_, Option<crate::cache::PythonCacheConfig>),
                       services,
                       interceptors,
                       observers| async move {
-                    let (cache, options) = selection.attach(services);
+                    let (cache, options) = selection.map(|config| config.attach(services)).unzip();
                     let route = match cache {
                         Some(cache) => route.with_cache(cache),
                         None => route,
@@ -49,7 +49,7 @@ fn run_messages(
                             call,
                             &interceptors,
                             litellm_core::CallOptions {
-                                cache: Some(options.policy),
+                                cache: options.map(|options| options.policy),
                                 observers,
                             },
                         )

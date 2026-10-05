@@ -12,12 +12,14 @@ use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use litellm_cache_memory::InMemoryCache;
 use litellm_cache_response::{
-    CacheOptions, CachePolicy, CacheScope, ResponseCache, ResponseCacheConfig,
-    ResponseCacheService, ResponseEnvelope,
+    CacheKeyContext, CacheKeyInput, CacheOptions, CachePolicy, CacheScope, ResponseCache,
+    ResponseCacheConfig, ResponseCacheService, ResponseEnvelope,
 };
 use litellm_core::{
     RouteError,
     caching::{Cachable, CacheRequest, StreamCachable, execute_streaming, execute_unary},
+    messages::route::Messages,
+    responses::route::Responses,
 };
 use litellm_host::{
     call::{CallOutput, OutputOf},
@@ -53,7 +55,7 @@ impl StreamCachable for TestRoute {
     fn replay(data: Bytes) -> Option<OutputOf<Self>> {
         Some(CallOutput::Stream {
             head: (),
-            chunks: stream::iter([Ok(data)]).boxed(),
+            chunks: stream::iter(litellm_framer::sse::RawBlocks::new(data).map(Ok)).boxed(),
         })
     }
     fn bytes(chunk: &Bytes) -> &[u8] {
@@ -67,7 +69,7 @@ fn cache_request(input: Value) -> CacheRequest {
             model: "test-model".into(),
             provider: "test-provider".into(),
         },
-        input,
+        input: CacheKeyInput::from_parameters(input),
     }
 }
 
@@ -228,6 +230,138 @@ async fn consume(output: OutputOf<TestRoute>) -> Result<Vec<u8>, RouteError> {
         .await
 }
 
+async fn collect_stream_chunks(output: OutputOf<TestRoute>) -> Vec<Bytes> {
+    let CallOutput::Stream { chunks, .. } = output else {
+        panic!("expected a stream");
+    };
+    chunks.try_collect().await.unwrap()
+}
+
+#[rstest]
+#[tokio::test]
+async fn messages_and_responses_replay_one_chunk_per_sse_event() {
+    let data = Bytes::from_static(
+        b"data: {\"type\":\"content_block_delta\",\"text\":\"hello\"}\n\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+    let expected = vec![
+        Bytes::from_static(b"data: {\"type\":\"content_block_delta\",\"text\":\"hello\"}\n\n"),
+        Bytes::from_static(b"data: {\"type\":\"message_stop\"}\n\n"),
+    ];
+
+    let CallOutput::Stream {
+        chunks: messages_chunks,
+        ..
+    } = <Messages as StreamCachable>::replay(data.clone()).unwrap()
+    else {
+        panic!("expected a Messages stream");
+    };
+    assert_eq!(
+        messages_chunks.try_collect::<Vec<_>>().await.unwrap(),
+        expected
+    );
+
+    let CallOutput::Stream {
+        chunks: responses_chunks,
+        ..
+    } = <Responses as StreamCachable>::replay(data).unwrap()
+    else {
+        panic!("expected a Responses stream");
+    };
+    assert_eq!(
+        responses_chunks.try_collect::<Vec<_>>().await.unwrap(),
+        expected
+    );
+}
+
+#[rstest]
+#[tokio::test]
+async fn cached_stream_replay_yields_one_chunk_per_event(cache: Arc<dyn ResponseCacheService>) {
+    let calls = AtomicUsize::new(0);
+    let first = b"data: {\"type\":\"content_block_delta\",\"text\":\"hello\"}\n\n";
+    let terminal = b"data: {\"type\":\"message_stop\"}\n\n";
+    let text = [first.as_slice(), terminal.as_slice()].concat();
+    let text = std::str::from_utf8(&text).unwrap();
+
+    assert_eq!(
+        consume(streamed(&cache, &calls, text, false).await)
+            .await
+            .unwrap(),
+        text.as_bytes()
+    );
+    assert_eq!(
+        collect_stream_chunks(streamed(&cache, &calls, text, false).await).await,
+        vec![Bytes::from_static(first), Bytes::from_static(terminal)]
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[rstest]
+#[tokio::test]
+async fn cached_stream_replay_preserves_utf8_split_across_provider_chunks(
+    cache: Arc<dyn ResponseCacheService>,
+) {
+    let calls = AtomicUsize::new(0);
+    let first = "data: {\"type\":\"content_block_delta\",\"text\":\"é🙂\"}\n\n".as_bytes();
+    let terminal = b"data: {\"type\":\"message_stop\"}\n\n";
+    let text = [first, terminal].concat();
+    let text = std::str::from_utf8(&text).unwrap();
+
+    assert_eq!(
+        consume(streamed(&cache, &calls, text, false).await)
+            .await
+            .unwrap(),
+        text.as_bytes()
+    );
+    let chunks = collect_stream_chunks(streamed(&cache, &calls, text, false).await).await;
+    assert_eq!(
+        chunks,
+        vec![Bytes::copy_from_slice(first), Bytes::from_static(terminal)]
+    );
+    assert_eq!(
+        chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter())
+            .copied()
+            .collect::<Vec<_>>(),
+        text.as_bytes()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[rstest]
+#[tokio::test]
+async fn dropping_cached_replay_after_first_event_polls_no_more_chunks(
+    cache: Arc<dyn ResponseCacheService>,
+) {
+    let calls = AtomicUsize::new(0);
+    let first = b"data: {\"type\":\"content_block_delta\",\"text\":\"first\"}\n\n";
+    let terminal = b"data: {\"type\":\"message_stop\"}\n\n";
+    let text = [first.as_slice(), terminal.as_slice()].concat();
+    let text = std::str::from_utf8(&text).unwrap();
+    let _stored = consume(streamed(&cache, &calls, text, false).await)
+        .await
+        .unwrap();
+    let CallOutput::Stream { chunks, .. } = streamed(&cache, &calls, text, false).await else {
+        panic!("expected a stream");
+    };
+    let polled = Arc::new(AtomicUsize::new(0));
+    let count = polled.clone();
+    let mut chunks = chunks
+        .map(move |chunk| {
+            count.fetch_add(1, Ordering::SeqCst);
+            chunk
+        })
+        .boxed();
+
+    assert_eq!(
+        chunks.next().await.unwrap().unwrap(),
+        Bytes::from_static(first)
+    );
+    drop(chunks);
+    assert_eq!(polled.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 #[rstest]
 #[case::complete("data: {\"type\":\"message_stop\"}\n\n", false, true)]
 #[case::truncated("data: {\"type\":\"content_block_delta\"}\n\n", false, false)]
@@ -373,6 +507,70 @@ impl ResponseCacheService for InvalidEntryCache {
     }
 }
 
+struct ResolveFailureCache {
+    config: ResponseCacheConfig,
+    lookups: AtomicUsize,
+    stores: AtomicUsize,
+}
+
+impl ResponseCacheService for ResolveFailureCache {
+    fn config(&self) -> &ResponseCacheConfig {
+        &self.config
+    }
+
+    fn resolve_key<'a>(
+        &'a self,
+        _: &'a litellm_cache_response::ResponseCacheRequest,
+    ) -> futures_util::future::BoxFuture<'a, Result<String, litellm_cache::Error>> {
+        Box::pin(async { Err(litellm_cache::Error::Unavailable) })
+    }
+
+    fn lookup<'a>(
+        &'a self,
+        _: &'a litellm_cache_response::ResponseCacheRequest,
+        _: Duration,
+    ) -> futures_util::future::BoxFuture<'a, Result<Option<Value>, litellm_cache::Error>> {
+        self.lookups.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(None) })
+    }
+
+    fn store<'a>(
+        &'a self,
+        _: &'a litellm_cache_response::ResponseCacheRequest,
+        _: Value,
+        _: Duration,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), litellm_cache::Error>> {
+        self.stores.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[rstest]
+#[tokio::test]
+async fn key_resolution_failure_skips_cache_and_runs_provider() {
+    let cache = Arc::new(ResolveFailureCache {
+        config: ResponseCacheConfig {
+            namespace: "test".into(),
+            max_entry_bytes: 4096,
+        },
+        lookups: AtomicUsize::new(0),
+        stores: AtomicUsize::new(0),
+    });
+    let service: Arc<dyn ResponseCacheService> = cache.clone();
+    let calls = AtomicUsize::new(0);
+    let response = call(
+        &service,
+        Some(CacheOptions::new(CacheScope::Shared)),
+        &calls,
+        json!({}),
+    )
+    .await;
+    assert_eq!(response["call"], json!(0));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(cache.lookups.load(Ordering::SeqCst), 0);
+    assert_eq!(cache.stores.load(Ordering::SeqCst), 0);
+}
+
 #[rstest]
 #[case::legacy(json!({"unexpected":"old-format"}))]
 #[case::wrong_version(json!({"version":2,"surface":"test","output":{"kind":"Response","value":{"call":100}}}))]
@@ -467,20 +665,16 @@ async fn messages_cache_identity_includes_provider_native_parameters(
     for (value, expected_call) in [(original.clone(), 0), (changed, 1), (original, 0)] {
         let response =
             execute_unary::<Messages, _, _>(
-                CacheRequest::from_wire(
-                    ProviderIdentity {
+                CacheRequest {
+                    identity: ProviderIdentity {
                         model: "test".into(),
                         provider: "anthropic".into(),
                     },
-                    Some(&WireRequest {
-                        url: "https://example.test/v1/messages".into(),
-                        headers: vec![],
-                        body: json!({
-                            "model":"test", "messages":[{"role":"user","content":"hello"}],
-                            "max_tokens":32, (field):value
-                        }),
-                    }),
-                ),
+                    input: CacheKeyInput::from_parameters(json!({
+                        "model":"test", "messages":[{"role":"user","content":"hello"}],
+                        "max_tokens":32, (field):value
+                    })),
+                },
                 Some(cache.clone()),
                 Some(CacheOptions::new(CacheScope::Shared)),
                 &(),
@@ -1022,6 +1216,9 @@ impl Interceptors<RouteError> for ChangingHooks {
 }
 
 #[rstest]
+#[case::chat_model_group("chat", "model_group")]
+#[case::messages_model_group("messages", "model_group")]
+#[case::responses_model_group("responses", "model_group")]
 #[case::chat_credentials("chat", "credentials")]
 #[case::chat_endpoint("chat", "endpoint")]
 #[case::chat_callback("chat", "callback")]
@@ -1056,7 +1253,11 @@ async fn cache_identity_follows_resolved_configuration_and_request_callbacks(
     };
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(response.clone()))
-        .expect(if change == "endpoint" { 1 } else { 2 })
+        .expect(if matches!(change, "endpoint" | "model_group") {
+            1
+        } else {
+            2
+        })
         .mount(&first)
         .await;
     Mock::given(method("POST"))
@@ -1084,7 +1285,18 @@ async fn cache_identity_follows_resolved_configuration_and_request_callbacks(
         secrets
             .revision
             .store(usize::from(call >= 2), Ordering::SeqCst);
-        let cache = ScopedCache::new(cache.clone(), CacheScope::Shared);
+        let cache = ScopedCache {
+            key_context: CacheKeyContext {
+                model_group: (change == "model_group").then(|| "logical-group".into()),
+                ..Default::default()
+            },
+            ..ScopedCache::new(cache.clone(), CacheScope::Shared)
+        };
+        let model = if change == "model_group" && call >= 2 {
+            "cache-alternate-model"
+        } else {
+            "cache-test-model"
+        };
         match surface {
             "chat" => {
                 ChatCompletionsRoute::new(
@@ -1095,7 +1307,7 @@ async fn cache_identity_follows_resolved_configuration_and_request_callbacks(
                 .with_cache(cache)
                 .execute(
                     ChatCompletionsRequest {
-                        model: "anthropic/cache-test-model",
+                        model: &format!("anthropic/{model}"),
                         messages: json!([{"role":"user","content":"hello"}]),
                         optional_params: [("max_tokens".into(), json!(32))].into_iter().collect(),
                         api_key: None,
@@ -1112,7 +1324,7 @@ async fn cache_identity_follows_resolved_configuration_and_request_callbacks(
             }
             "messages" => {
                 support::messages_route(secrets.clone()).with_cache(cache).execute(MessagesCall {
-                    body: serde_json::from_value(json!({"model":"anthropic/cache-test-model","messages":[{"role":"user","content":"hello"}],"max_tokens":32})).unwrap(),
+                    body: serde_json::from_value(json!({"model":format!("anthropic/{model}"),"messages":[{"role":"user","content":"hello"}],"max_tokens":32})).unwrap(),
                     api_key:None,api_base:None,custom_llm_provider:None,extra_headers:None,provider_specific_header:None,timeout:None,shaping:Default::default(),
                 }, &hooks, None).await.unwrap();
             }
@@ -1121,7 +1333,7 @@ async fn cache_identity_follows_resolved_configuration_and_request_callbacks(
                     .with_cache(cache)
                     .execute(
                         ResponsesCall {
-                            model: "test".into(),
+                            model: model.into(),
                             input: json!("hello"),
                             optional_params: Default::default(),
                             api_key: None,
@@ -1143,13 +1355,17 @@ async fn cache_identity_follows_resolved_configuration_and_request_callbacks(
     {
         let facts = hooks.facts.lock().unwrap();
         assert_eq!(facts[0].source, ResultSource::Provider);
-        assert_eq!(facts[2].source, ResultSource::Provider);
+        if change == "model_group" {
+            assert!(matches!(facts[2].source, ResultSource::Cache { .. }));
+        } else {
+            assert_eq!(facts[2].source, ResultSource::Provider);
+        }
         let (ResultSource::Cache { key: first_key }, ResultSource::Cache { key: second_key }) =
             (&facts[1].source, &facts[3].source)
         else {
             panic!("unchanged effective requests must hit the cache");
         };
-        assert_ne!(first_key, second_key);
+        assert_eq!(first_key == second_key, change == "model_group");
     }
     let requests = first.received_requests().await.unwrap();
     if change == "credentials" {
@@ -1214,4 +1430,28 @@ async fn signed_requests_bypass_response_caching(cache: Arc<dyn ResponseCacheSer
             .all(|facts| facts.source == ResultSource::Provider)
     );
     upstream.verify().await;
+}
+
+#[rstest]
+#[tokio::test]
+async fn logical_model_groups_distinguish_identical_provider_inputs(
+    cache: Arc<dyn ResponseCacheService>,
+) {
+    let calls = AtomicUsize::new(0);
+    let options = |group: &str| {
+        Some(CacheOptions {
+            key_context: CacheKeyContext {
+                model_group: Some(group.into()),
+                ..Default::default()
+            },
+            ..CacheOptions::new(CacheScope::Shared)
+        })
+    };
+    let request = json!({"model":"deployment", "messages":[{"role":"user", "content":"hello"}]});
+    let first = call(&cache, options("first"), &calls, request.clone()).await;
+    let second = call(&cache, options("second"), &calls, request.clone()).await;
+    let replay = call(&cache, options("first"), &calls, request).await;
+    assert_ne!(first, second);
+    assert_eq!(first, replay);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
