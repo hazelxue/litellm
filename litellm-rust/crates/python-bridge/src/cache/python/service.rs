@@ -53,7 +53,7 @@ fn to_python(value: Value, surface: &'static str) -> Result<Value, Error> {
 }
 
 pub(crate) enum CacheCall {
-    ResolveKey {
+    GetCacheKey {
         reply: Reply<Result<String, Error>>,
     },
     Lookup {
@@ -96,7 +96,7 @@ where
         &self.config
     }
 
-    fn resolve_key<'a>(
+    fn get_cache_key<'a>(
         &'a self,
         request: &'a ResponseCacheRequest,
     ) -> Pin<Box<dyn Future<Output = Result<String, Error>> + Send + 'a>> {
@@ -105,7 +105,7 @@ where
                 RequestRewrite::Rewritten => Err(Error::UnsupportedOperation),
                 RequestRewrite::Unchanged => self
                     .services
-                    .call(|reply| CacheCall::ResolveKey { reply })
+                    .call(|reply| CacheCall::GetCacheKey { reply })
                     .await
                     .map_err(|_| Error::Unavailable)?,
             }

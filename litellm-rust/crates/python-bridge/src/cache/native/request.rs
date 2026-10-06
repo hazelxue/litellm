@@ -179,7 +179,7 @@ pub(in crate::cache) fn now() -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use litellm_cache_response::{CacheControls, CacheKeyInput, cache_key};
+    use litellm_cache_response::{CacheControls, CacheKeyInput, get_cache_key};
     use rstest::rstest;
     use serde_json::json;
     use sha2::{Digest, Sha256};
@@ -217,15 +217,15 @@ mod tests {
             json!({"user_api_key": "key", "user_api_key_end_user_id": "second"}),
         );
         assert_eq!(
-            cache_key(&first.scoped_semantic(scope).key)
-                != cache_key(&second.scoped_semantic(scope).key),
+            get_cache_key(&first.scoped_semantic(scope).key)
+                != get_cache_key(&second.scoped_semantic(scope).key),
             isolated,
         );
         let without_end_user =
             native_request(CacheKeyInput::default(), json!({"user_api_key": "key"}));
         assert_eq!(
-            cache_key(&without_end_user.scoped_semantic(scope).key),
-            cache_key(
+            get_cache_key(&without_end_user.scoped_semantic(scope).key),
+            get_cache_key(
                 &without_end_user
                     .scoped_semantic(SemanticCacheScope::Key)
                     .key
@@ -262,11 +262,11 @@ mod tests {
         );
         let expected = format!("{:x}", Sha256::digest(b"model: gpt-4.1user_api_key: k1"));
         assert_eq!(
-            cache_key(&semantic_key(&request, SemanticCacheScope::Key)),
+            get_cache_key(&semantic_key(&request, SemanticCacheScope::Key)),
             expected
         );
         assert_eq!(
-            cache_key(&request.scoped_semantic(SemanticCacheScope::Key).key),
+            get_cache_key(&request.scoped_semantic(SemanticCacheScope::Key).key),
             expected
         );
 
@@ -279,7 +279,7 @@ mod tests {
             Sha256::digest(b"model: gpt-4.1user_api_key: k1user_api_key_end_user_id: u1")
         );
         assert_eq!(
-            cache_key(&semantic_key(
+            get_cache_key(&semantic_key(
                 &end_user_request,
                 SemanticCacheScope::EndUser
             )),
