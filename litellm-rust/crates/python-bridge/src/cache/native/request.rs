@@ -2,7 +2,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use litellm_cache::{ExactCacheContext, SemanticCacheContext};
 use litellm_cache_response::{
-    CacheControls, CacheKeyField, CacheKeyInput, CacheKeyParticipation, ResponseCacheRequest,
+    CacheAccess, CacheKeyField, CacheKeyInput, CacheKeyParticipation, ResponseCacheRequest,
 };
 use litellm_host_python::from_py;
 use pyo3::{exceptions::PyValueError, prelude::*};
@@ -15,7 +15,7 @@ use super::config::SemanticCacheScope;
 #[serde(deny_unknown_fields)]
 struct RequestInput {
     key: CacheKeyInput,
-    controls: Option<CacheControls>,
+    access: Option<CacheAccess>,
     ttl_seconds: Option<f64>,
     max_age_seconds: Option<f64>,
     messages: Option<Value>,
@@ -29,7 +29,7 @@ struct RequestInput {
 #[derive(Clone)]
 pub(in crate::cache) struct NativeRequest {
     pub(super) key: CacheKeyInput,
-    pub(super) controls: CacheControls,
+    pub(super) access: CacheAccess,
     pub(super) ttl: Option<Duration>,
     pub(super) max_age: Option<Duration>,
     pub(super) messages: Option<Value>,
@@ -45,7 +45,7 @@ impl NativeRequest {
         ResponseCacheRequest {
             rewrite: litellm_cache_response::RequestRewrite::from(&self.key),
             key: self.key.clone(),
-            controls: self.controls,
+            access: self.access,
             context: ExactCacheContext { ttl: self.ttl },
             max_age: self.max_age,
         }
@@ -73,7 +73,7 @@ impl NativeRequest {
         ResponseCacheRequest {
             rewrite: litellm_cache_response::RequestRewrite::from(&key),
             key,
-            controls: self.controls,
+            access: self.access,
             context: SemanticCacheContext {
                 input: self.input.clone(),
                 messages: self.messages.clone(),
@@ -143,12 +143,9 @@ pub(in crate::cache) fn request(value: &Bound<'_, PyAny>) -> PyResult<NativeRequ
 }
 
 fn request_input(input: RequestInput) -> PyResult<NativeRequest> {
-    let controls = input.controls.unwrap_or_else(|| {
-        ResponseCacheRequest::<ExactCacheContext>::new(input.key.clone()).controls
-    });
     Ok(NativeRequest {
         key: input.key,
-        controls,
+        access: input.access.unwrap_or(CacheAccess::READ_WRITE),
         ttl: input.ttl_seconds.map(duration).transpose()?,
         max_age: input.max_age_seconds.map(duration).transpose()?,
         messages: input.messages,
@@ -180,7 +177,7 @@ pub(in crate::cache) fn now() -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use litellm_cache_response::{CacheControls, CacheKeyInput, get_cache_key};
+    use litellm_cache_response::{CacheKeyInput, get_cache_key};
     use rstest::rstest;
     use serde_json::json;
     use sha2::{Digest, Sha256};
@@ -190,7 +187,7 @@ mod tests {
     fn native_request(key: CacheKeyInput, metadata: Value) -> NativeRequest {
         NativeRequest {
             key,
-            controls: CacheControls::default(),
+            access: CacheAccess::NONE,
             ttl: None,
             max_age: None,
             messages: Some(json!([{"role": "user", "content": "prompt"}])),

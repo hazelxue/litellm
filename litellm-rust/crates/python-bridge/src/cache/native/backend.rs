@@ -10,7 +10,7 @@ use litellm_cache_qdrant_semantic::{OpenAiEmbedder, QdrantSemanticCache};
 use litellm_cache_redis::{RedisCache, RedisTopology};
 use litellm_cache_redis_semantic::{RedisSemanticCache, RedisSemanticConfig};
 use litellm_cache_response::{
-    ConnectionProbe, ExactResponseCache, PartialHits, ResponseCache, ResponseCacheCodec,
+    BatchLookup, ConnectionProbe, ExactResponseCache, ResponseCache, ResponseCacheCodec,
     WriteBuffer,
 };
 use litellm_cache_s3::{S3Cache, S3CacheConfig};
@@ -411,7 +411,7 @@ impl NativeResponseCache {
         &self,
         requests: &[NativeRequest],
         now: Duration,
-    ) -> Result<PartialHits, Error> {
+    ) -> Result<BatchLookup<Value>, Error> {
         match self {
             Self::Exact(service) => service.cache.lookup_batch(&exact_requests(requests), now),
             Self::ValkeySemantic { .. } | Self::RedisSemantic { .. } | Self::QdrantSemantic(_) => {
@@ -566,7 +566,7 @@ impl NativeResponseCache {
         &self,
         requests: &[NativeRequest],
         now: Duration,
-    ) -> Result<PartialHits, Error> {
+    ) -> Result<BatchLookup<Value>, Error> {
         match self {
             Self::Exact(service) => {
                 service

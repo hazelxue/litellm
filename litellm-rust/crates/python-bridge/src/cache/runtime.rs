@@ -1,5 +1,5 @@
 use crate::execution::run_async;
-use litellm_cache_response::PartialHits;
+use litellm_cache_response::BatchLookup;
 use litellm_host_python::{ExecutionStep, from_py, release_gil, to_py};
 use pyo3::{
     PyTraverseError, PyVisit,
@@ -237,7 +237,7 @@ impl ResolvedCache {
         match &self.binding {
             CacheBinding::Disabled => {
                 let requests = self::requests(requests)?;
-                to_py(py, &PartialHits::misses(requests.len()))
+                to_py(py, &BatchLookup::<Value>::misses(requests.len()))
             }
             CacheBinding::Native(service) => {
                 let requests = self::requests(requests)?;
@@ -299,7 +299,7 @@ impl ResolvedCache {
         match &self.binding {
             CacheBinding::Disabled => {
                 let requests = self::requests(requests)?;
-                ready_value(py, &PartialHits::misses(requests.len()))
+                ready_value(py, &BatchLookup::<Value>::misses(requests.len()))
             }
             CacheBinding::Native(service) => {
                 let requests = self::requests(requests)?;

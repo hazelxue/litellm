@@ -95,16 +95,7 @@ def test_selected_disk_runtime_declines_store_changes(tmp_path: Path) -> None:
 async def test_disk_native_batch_lookup_and_store_report_partial_hits(tmp_path: Path) -> None:
     binding: Final = native_runtime(Cache(type=LiteLLMCacheType.DISK, disk_cache_dir=str(tmp_path)))
     requests: Final = [request("hit"), request("miss"), request("disabled")]
-    requests[2]["controls"] = {
-        "supported_call_type": True,
-        "configured": True,
-        "native_backend": True,
-        "default_on": True,
-        "caching": False,
-        "no_cache": False,
-        "no_store": False,
-        "use_cache": False,
-    }
+    requests[2]["access"] = {"reads": False, "writes": False}
     await binding.async_store_batch(requests, [{"value": 1}, {"value": 2}, {"value": 3}])
 
     partial: Final = await binding.async_lookup_batch(requests)

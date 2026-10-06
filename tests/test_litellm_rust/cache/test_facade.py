@@ -283,16 +283,7 @@ async def test_native_batch_lookup_and_store_report_partial_hits() -> None:
         SimpleNamespace(cache=activate_native(Cache(type=LiteLLMCacheType.LOCAL)))
     ).resolve()
     requests: Final = [request("hit"), request("miss"), request("disabled")]
-    requests[2]["controls"] = {
-        "supported_call_type": True,
-        "configured": True,
-        "native_backend": True,
-        "default_on": True,
-        "caching": False,
-        "no_cache": False,
-        "no_store": False,
-        "use_cache": False,
-    }
+    requests[2]["access"] = {"reads": False, "writes": False}
     await binding.async_store_batch(requests, [{"value": 1}, {"value": 2}, {"value": 3}])
 
     partial: Final = await binding.async_lookup_batch(requests)

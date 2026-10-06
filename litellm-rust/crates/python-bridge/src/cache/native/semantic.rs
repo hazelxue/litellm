@@ -92,8 +92,8 @@ impl SemanticExecution {
         };
         let (request, response) = &pending;
         let enabled = match response {
-            None => request.controls.reads(),
-            Some(_) => request.controls.writes(),
+            None => request.access.reads,
+            Some(_) => request.access.writes,
         };
         let input = enabled
             .then(|| self.service.embedding_input(request))

@@ -66,14 +66,12 @@ def _field_request(
                 {
                     "name": "model",
                     "value": "gpt-4.1",
-                    "api_parameter": True,
-                    "internal_parameter": False,
+                    "participation": "always",
                 },
                 {
                     "name": "messages",
                     "value": prompt,
-                    "api_parameter": True,
-                    "internal_parameter": False,
+                    "participation": "always",
                 },
             ],
             "namespace": namespace,
@@ -165,19 +163,9 @@ async def test_disabled_cache_controls_skip_async_embedding(
 
     backend._get_async_embedding = fail_embedding
     binding: Final = native_runtime(facade)
-    controls: Final = {
-        "supported_call_type": True,
-        "configured": True,
-        "native_backend": True,
-        "default_on": True,
-        "caching": True,
-        "no_cache": False,
-        "no_store": False,
-        "use_cache": True,
-    }
-    no_read_request: Final = {**_request(), "controls": {**controls, "no_cache": True}}
+    no_read_request: Final = {**_request(), "access": {"reads": False, "writes": True}}
     assert await binding.async_lookup(no_read_request) is None
-    no_write_request: Final = {**_request(), "controls": {**controls, "no_store": True}}
+    no_write_request: Final = {**_request(), "access": {"reads": True, "writes": False}}
     await binding.async_store(no_write_request, {"answer": "blocked"})
     assert calls == []
     client: Final = redis.Redis.from_url(valkey_url)
