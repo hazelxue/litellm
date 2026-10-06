@@ -7,6 +7,8 @@ use pyo3::{exceptions::PyValueError, prelude::*};
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::config::SemanticCacheScope;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequestInput {
@@ -39,6 +41,7 @@ pub(in crate::cache) struct NativeRequest {
 impl NativeRequest {
     pub(super) fn exact(&self) -> ResponseCacheRequest<ExactCacheContext> {
         ResponseCacheRequest {
+            rewrite: litellm_cache_response::RequestRewrite::from(&self.key),
             key: self.key.clone(),
             controls: self.controls,
             context: ExactCacheContext { ttl: self.ttl },
@@ -55,9 +58,9 @@ impl NativeRequest {
     /// and the tenant identifiers for `scope` join the key.
     pub(super) fn scoped_semantic(
         &self,
-        scope: &str,
+        scope: SemanticCacheScope,
     ) -> ResponseCacheRequest<SemanticCacheContext> {
-        self.semantic_with(semantic_key(self, scope), Some(scope.to_owned()))
+        self.semantic_with(semantic_key(self, scope), Some(scope.as_ref().to_owned()))
     }
 
     fn semantic_with(
@@ -66,6 +69,7 @@ impl NativeRequest {
         scope: Option<String>,
     ) -> ResponseCacheRequest<SemanticCacheContext> {
         ResponseCacheRequest {
+            rewrite: litellm_cache_response::RequestRewrite::from(&key),
             key,
             controls: self.controls,
             context: SemanticCacheContext {
@@ -80,7 +84,7 @@ impl NativeRequest {
     }
 }
 
-fn semantic_key(request: &NativeRequest, scope: &str) -> CacheKeyInput {
+fn semantic_key(request: &NativeRequest, scope: SemanticCacheScope) -> CacheKeyInput {
     let mut key = request.key.clone();
     if key.preset.is_some() {
         return key;
@@ -92,7 +96,10 @@ fn semantic_key(request: &NativeRequest, scope: &str) -> CacheKeyInput {
         "user_api_key_team_id",
         "user_api_key_org_id",
     ];
-    let end_user = (scope == "end_user").then_some("user_api_key_end_user_id");
+    let end_user = match scope {
+        SemanticCacheScope::Key => None,
+        SemanticCacheScope::EndUser => Some("user_api_key_end_user_id"),
+    };
     for name in TENANT.into_iter().chain(end_user) {
         let sources = [
             request.metadata.as_ref(),
@@ -173,6 +180,7 @@ pub(in crate::cache) fn now() -> Duration {
 #[cfg(test)]
 mod tests {
     use litellm_cache_response::{CacheControls, CacheKeyInput, cache_key};
+    use rstest::rstest;
     use serde_json::json;
     use sha2::{Digest, Sha256};
 
@@ -193,7 +201,43 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
+    #[case::key(SemanticCacheScope::Key, false)]
+    #[case::end_user(SemanticCacheScope::EndUser, true)]
+    fn semantic_scope_isolates_end_users(
+        #[case] scope: SemanticCacheScope,
+        #[case] isolated: bool,
+    ) {
+        let first = native_request(
+            CacheKeyInput::default(),
+            json!({"user_api_key": "key", "user_api_key_end_user_id": "first"}),
+        );
+        let second = native_request(
+            CacheKeyInput::default(),
+            json!({"user_api_key": "key", "user_api_key_end_user_id": "second"}),
+        );
+        assert_eq!(
+            cache_key(&first.scoped_semantic(scope).key)
+                != cache_key(&second.scoped_semantic(scope).key),
+            isolated,
+        );
+        let without_end_user =
+            native_request(CacheKeyInput::default(), json!({"user_api_key": "key"}));
+        assert_eq!(
+            cache_key(&without_end_user.scoped_semantic(scope).key),
+            cache_key(
+                &without_end_user
+                    .scoped_semantic(SemanticCacheScope::Key)
+                    .key
+            ),
+        );
+        assert_eq!(
+            first.scoped_semantic(scope).context.scope.as_deref(),
+            Some(scope.as_ref())
+        );
+    }
+
+    #[rstest]
     fn semantic_key_matches_python_scope_material() {
         let key = CacheKeyInput {
             fields: vec![
@@ -217,8 +261,14 @@ mod tests {
             json!({"user_api_key": "k1", "user_api_key_team_id": null}),
         );
         let expected = format!("{:x}", Sha256::digest(b"model: gpt-4.1user_api_key: k1"));
-        assert_eq!(cache_key(&semantic_key(&request, "key")), expected);
-        assert_eq!(cache_key(&request.scoped_semantic("key").key), expected);
+        assert_eq!(
+            cache_key(&semantic_key(&request, SemanticCacheScope::Key)),
+            expected
+        );
+        assert_eq!(
+            cache_key(&request.scoped_semantic(SemanticCacheScope::Key).key),
+            expected
+        );
 
         let end_user_request = native_request(
             request.key.clone(),
@@ -229,7 +279,10 @@ mod tests {
             Sha256::digest(b"model: gpt-4.1user_api_key: k1user_api_key_end_user_id: u1")
         );
         assert_eq!(
-            cache_key(&semantic_key(&end_user_request, "end_user")),
+            cache_key(&semantic_key(
+                &end_user_request,
+                SemanticCacheScope::EndUser
+            )),
             expected
         );
 
@@ -241,14 +294,20 @@ mod tests {
             json!({"user_api_key": "k1"}),
         );
         assert_eq!(
-            semantic_key(&preset_request, "end_user").preset.as_deref(),
+            semantic_key(&preset_request, SemanticCacheScope::EndUser)
+                .preset
+                .as_deref(),
             Some("preset-key")
         );
-        assert!(semantic_key(&preset_request, "end_user").fields.is_empty());
+        assert!(
+            semantic_key(&preset_request, SemanticCacheScope::EndUser)
+                .fields
+                .is_empty()
+        );
         assert_eq!(preset_request.semantic().context.scope, None);
         assert_eq!(
             preset_request
-                .scoped_semantic("end_user")
+                .scoped_semantic(SemanticCacheScope::EndUser)
                 .context
                 .scope
                 .as_deref(),

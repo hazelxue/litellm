@@ -19,7 +19,7 @@ use pyo3::prelude::*;
 use serde_json::Value;
 
 use super::{
-    config::QdrantSemanticCacheConfig,
+    config::{QdrantSemanticCacheConfig, SemanticCacheScope},
     embedder::PythonEmbedder,
     identity::BackendIdentity,
     request::{NativeRequest, now},
@@ -46,7 +46,7 @@ pub(in crate::cache) enum NativeResponseCache {
     ValkeySemantic {
         cache: Arc<ResponseCache<ValkeySemanticCache<PythonEmbedder, ResponseCacheCodec>>>,
         embedder: PythonEmbedder,
-        scope: String,
+        scope: SemanticCacheScope,
     },
     RedisSemantic {
         cache: Arc<ResponseCache<RedisSemanticCache<PythonEmbedder, ResponseCacheCodec>>>,
@@ -225,7 +225,7 @@ impl NativeResponseCache {
         Ok(Self::ValkeySemantic {
             cache: Arc::new(ResponseCache::new(Arc::new(backend))),
             embedder,
-            scope: String::from("key"),
+            scope: SemanticCacheScope::Key,
         })
     }
 
@@ -300,7 +300,7 @@ impl NativeResponseCache {
         }
     }
 
-    pub fn with_scope(self, scope: String) -> Self {
+    pub fn with_scope(self, scope: SemanticCacheScope) -> Self {
         match self {
             Self::ValkeySemantic {
                 cache, embedder, ..
@@ -326,7 +326,7 @@ impl NativeResponseCache {
         request: &NativeRequest,
     ) -> Option<EmbeddingInput> {
         let context = match self {
-            Self::ValkeySemantic { scope, .. } => request.scoped_semantic(scope).context,
+            Self::ValkeySemantic { scope, .. } => request.scoped_semantic(*scope).context,
             Self::RedisSemantic { .. } => request.semantic().context,
             Self::Exact(_) | Self::QdrantSemantic(_) => return None,
         };
@@ -362,7 +362,7 @@ impl NativeResponseCache {
         match self {
             Self::Exact(service) => service.cache.lookup(&request.exact(), now),
             Self::ValkeySemantic { cache, scope, .. } => {
-                cache.lookup(&request.scoped_semantic(scope), now)
+                cache.lookup(&request.scoped_semantic(*scope), now)
             }
             Self::RedisSemantic { cache, .. } => cache.lookup(&request.semantic(), now),
             Self::QdrantSemantic(cache) => cache.lookup(&request.semantic(), now),
@@ -382,7 +382,7 @@ impl NativeResponseCache {
                 .lookup(&request.exact(), now)
                 .map(exact_lookup),
             Self::ValkeySemantic { cache, scope, .. } => {
-                redis_family(cache.lookup_semantic(&request.scoped_semantic(scope), now))
+                redis_family(cache.lookup_semantic(&request.scoped_semantic(*scope), now))
             }
             Self::RedisSemantic { cache, .. } => {
                 redis_family(cache.lookup_semantic(&request.semantic(), now))
@@ -400,7 +400,7 @@ impl NativeResponseCache {
         match self {
             Self::Exact(service) => service.cache.store(&request.exact(), response, now),
             Self::ValkeySemantic { cache, scope, .. } => {
-                cache.store(&request.scoped_semantic(scope), response, now)
+                cache.store(&request.scoped_semantic(*scope), response, now)
             }
             Self::RedisSemantic { cache, .. } => cache.store(&request.semantic(), response, now),
             Self::QdrantSemantic(cache) => cache.store(&request.semantic(), response, now),
@@ -429,7 +429,7 @@ impl NativeResponseCache {
             Self::Exact(service) => service.cache.async_lookup(&request.exact(), now).await,
             Self::ValkeySemantic { cache, scope, .. } => {
                 cache
-                    .async_lookup(&request.scoped_semantic(scope), now)
+                    .async_lookup(&request.scoped_semantic(*scope), now)
                     .await
             }
             Self::RedisSemantic { cache, .. } => cache.async_lookup(&request.semantic(), now).await,
@@ -450,7 +450,7 @@ impl NativeResponseCache {
                 .map(exact_lookup),
             Self::ValkeySemantic { cache, scope, .. } => redis_family(
                 cache
-                    .async_lookup_semantic(&request.scoped_semantic(scope), now)
+                    .async_lookup_semantic(&request.scoped_semantic(*scope), now)
                     .await,
             ),
             Self::RedisSemantic { cache, .. } => {
@@ -529,7 +529,7 @@ impl NativeResponseCache {
             },
             Self::ValkeySemantic { cache, scope, .. } => {
                 cache
-                    .async_store(&request.scoped_semantic(scope), response, now)
+                    .async_store(&request.scoped_semantic(*scope), response, now)
                     .await
             }
             Self::RedisSemantic { cache, .. } => {
@@ -596,7 +596,7 @@ impl NativeResponseCache {
             Self::ValkeySemantic { cache, scope, .. } => {
                 let entries = entries
                     .into_iter()
-                    .map(|(request, value)| (request.scoped_semantic(scope), value))
+                    .map(|(request, value)| (request.scoped_semantic(*scope), value))
                     .collect();
                 cache.async_store_batch(entries, now).await
             }

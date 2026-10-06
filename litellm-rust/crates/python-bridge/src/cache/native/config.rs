@@ -5,6 +5,7 @@ use litellm_cache::CacheType;
 use litellm_cache_qdrant_semantic::{OpenAiEmbedderConfig, QdrantSemanticConfig, Quantization};
 use litellm_cache_redis::{RedisNode, RedisTopology};
 use litellm_cache_s3::{S3CacheConfig, S3Endpoint};
+use litellm_host_python::from_py;
 use pyo3::{
     exceptions::{PyAttributeError, PyTypeError, PyValueError},
     prelude::*,
@@ -13,9 +14,17 @@ use pyo3::{
 
 use super::{backend::NativeResponseCache, identity::BackendIdentity, request::duration};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, strum::AsRefStr)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub(super) enum SemanticCacheScope {
+    Key,
+    EndUser,
+}
+
 pub(super) struct CachePolicy {
     pub(super) redis_flush_size: Option<usize>,
-    pub(super) semantic_cache_scope: String,
+    pub(super) semantic_cache_scope: SemanticCacheScope,
 }
 
 pub(super) struct MemoryCacheConfig {
@@ -318,9 +327,7 @@ impl NativeCacheConfig {
             redis_flush_size: facade
                 .getattr("redis_flush_size")?
                 .extract::<Option<usize>>()?,
-            semantic_cache_scope: facade
-                .getattr("semantic_cache_scope")?
-                .extract::<String>()?,
+            semantic_cache_scope: from_py(&facade.getattr("semantic_cache_scope")?)?,
         };
         let backend = facade.getattr("cache")?;
         match CacheType::from_python_name(&backend_name) {
@@ -1168,7 +1175,8 @@ mod tests {
     use super::{
         CacheBackendConfig, CacheConfigProjection, CachePolicy, CertificateRequirement,
         GcsCacheConfig, NativeCacheConfig, REDIS_PY_DEFAULT_MAX_CONNECTIONS, RedisConnectionConfig,
-        RedisProtocol, RedisSemanticCacheConfig, RedisTlsConfig, UnsupportedCacheConfig,
+        RedisProtocol, RedisSemanticCacheConfig, RedisTlsConfig, SemanticCacheScope,
+        UnsupportedCacheConfig,
     };
     use crate::cache::native::{backend::NativeResponseCache, embedder::PythonEmbedder};
 
@@ -1253,6 +1261,41 @@ mod tests {
     }
 
     #[rstest]
+    #[case::key("'key'", Some(SemanticCacheScope::Key))]
+    #[case::end_user("'end_user'", Some(SemanticCacheScope::EndUser))]
+    #[case::unknown("'team'", None)]
+    #[case::empty("''", None)]
+    #[case::wrong_case("'KEY'", None)]
+    #[case::non_string("1", None)]
+    #[case::null("None", None)]
+    fn validates_semantic_scope_configuration(
+        _interpreter: (),
+        #[case] scope: &str,
+        #[case] expected: Option<SemanticCacheScope>,
+    ) {
+        Python::attach(|py| {
+            let facade = facade(
+                py,
+                &format!(
+                    "backend = SimpleNamespace(default_ttl=120, max_size_in_memory=37, max_size_per_item=8)\n\
+                     facade = SimpleNamespace(type='local', redis_flush_size=None, semantic_cache_scope={scope}, cache=backend)"
+                ),
+            );
+            let projected = NativeCacheConfig::project(&facade);
+            match expected {
+                Some(expected) => {
+                    let CacheConfigProjection::Native(config) = projected.unwrap() else {
+                        panic!("expected native configuration");
+                    };
+                    assert_eq!(config.policy.semantic_cache_scope, expected);
+                    assert_eq!(format!("'{}'", expected.as_ref()), scope);
+                }
+                None => assert!(projected.is_err()),
+            }
+        });
+    }
+
+    #[rstest]
     fn projects_effective_memory_configuration(_interpreter: ()) {
         Python::attach(|py| {
             let facade = facade(
@@ -1261,7 +1304,7 @@ mod tests {
                  facade = SimpleNamespace(type='local', mode='default-on', ttl=11.5, namespace=None, supported_call_types=['completion'], redis_flush_size=None, semantic_cache_scope='key', cache=backend)",
             );
             let config = native(&facade);
-            assert_eq!(config.policy.semantic_cache_scope, "key");
+            assert_eq!(config.policy.semantic_cache_scope, SemanticCacheScope::Key);
             assert_eq!(config.policy.redis_flush_size, None);
             let CacheBackendConfig::Memory(memory) = config.backend else {
                 panic!("expected memory configuration");
@@ -1308,7 +1351,7 @@ mod tests {
             let matching_config = NativeCacheConfig {
                 policy: CachePolicy {
                     redis_flush_size: None,
-                    semantic_cache_scope: "key".into(),
+                    semantic_cache_scope: SemanticCacheScope::Key,
                 },
                 backend: CacheBackendConfig::RedisSemantic(config),
             };
