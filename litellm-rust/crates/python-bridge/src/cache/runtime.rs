@@ -237,7 +237,7 @@ impl ResolvedCache {
         match &self.binding {
             CacheBinding::Disabled => {
                 let requests = self::requests(requests)?;
-                to_py(py, &PartialHits::new(vec![None; requests.len()]))
+                to_py(py, &PartialHits::misses(requests.len()))
             }
             CacheBinding::Native(service) => {
                 let requests = self::requests(requests)?;
@@ -299,7 +299,7 @@ impl ResolvedCache {
         match &self.binding {
             CacheBinding::Disabled => {
                 let requests = self::requests(requests)?;
-                ready_value(py, &PartialHits::new(vec![None; requests.len()]))
+                ready_value(py, &PartialHits::misses(requests.len()))
             }
             CacheBinding::Native(service) => {
                 let requests = self::requests(requests)?;
