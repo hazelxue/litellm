@@ -1,7 +1,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use litellm_cache::{ExactCacheContext, SemanticCacheContext};
-use litellm_cache_response::{CacheControls, CacheKeyField, CacheKeyInput, ResponseCacheRequest};
+use litellm_cache_response::{
+    CacheControls, CacheKeyField, CacheKeyInput, CacheKeyParticipation, ResponseCacheRequest,
+};
 use litellm_host_python::from_py;
 use pyo3::{exceptions::PyValueError, prelude::*};
 use serde::Deserialize;
@@ -129,8 +131,7 @@ fn semantic_key(request: &NativeRequest, scope: SemanticCacheScope) -> CacheKeyI
         key.fields.push(CacheKeyField {
             name: name.to_owned(),
             value: Some(value),
-            api_parameter: true,
-            internal_parameter: false,
+            participation: CacheKeyParticipation::Always,
         });
     }
     key
@@ -244,14 +245,12 @@ mod tests {
                 CacheKeyField {
                     name: "model".to_owned(),
                     value: Some("gpt-4.1".to_owned()),
-                    api_parameter: true,
-                    internal_parameter: false,
+                    participation: CacheKeyParticipation::Always,
                 },
                 CacheKeyField {
                     name: "messages".to_owned(),
                     value: Some("prompt".to_owned()),
-                    api_parameter: true,
-                    internal_parameter: false,
+                    participation: CacheKeyParticipation::Always,
                 },
             ],
             ..Default::default()
