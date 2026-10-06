@@ -1,6 +1,8 @@
 "use client";
 
 import CopyButton from "@/components/shared/CopyButton";
+
+import { AddToDatasetButton } from "../../../datasets/AddToDatasetDialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 import { useTracesApi } from "../../api";
@@ -21,6 +23,8 @@ export interface SpanTabProps {
 }
 
 type Fact = readonly [label: string, value: string];
+
+const TURN_TYPES: ReadonlySet<Span["type"]> = new Set(["agent", "llm"]);
 
 const spanFacts = (span: Span): readonly Fact[] => {
   const tokens = span.input_tokens + span.output_tokens;
@@ -52,7 +56,19 @@ export function SpanPane({
         title={span.type === "llm" ? span.model || span.name : span.name}
         idValue={span.span_id}
         facts={spanFacts(span)}
-        actions={<CopyButton variant="action" value={handoff.text} label="Copy step" copiedLabel={handoff.copied} />}
+        actions={
+          <>
+            {TURN_TYPES.has(span.type) && (
+              <AddToDatasetButton
+                sources={[{ kind: "trace", trace_id: traceId, trace_ref: traceRef ?? "", span_id: span.span_id }]}
+                agentName={span.agent}
+                label="Add this turn to dataset"
+                className="h-6"
+              />
+            )}
+            <CopyButton variant="action" value={handoff.text} label="Copy step" copiedLabel={handoff.copied} />
+          </>
+        }
         onClose={onClose}
       />
       <Tabs value={tab} onValueChange={(value) => onSpanTabChange(value as SpanTab)} className="min-h-0 flex-1 gap-0">
