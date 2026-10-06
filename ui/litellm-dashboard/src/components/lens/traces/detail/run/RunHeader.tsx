@@ -9,6 +9,7 @@ import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/cva.config";
 import { copyToClipboard } from "@/utils/dataUtils";
 
+import { AddToDatasetButton } from "../../../datasets/AddToDatasetDialog";
 import type { TraceHandoff } from "../../api";
 import { formatCost } from "../../list/AgentTracesTable";
 import { IdChip } from "../../ui/IdChip";
@@ -103,7 +104,13 @@ export function RunHeader({ trace, handoff, onBack, embedded }: RunHeaderProps) 
               Conversation
             </TabsTrigger>
           </TabsList>
-          <CopyForAgent handoff={handoff} />
+          <div className="flex items-center gap-2">
+            <AddToDatasetButton
+              sources={[{ kind: "trace", trace_id: summary.trace_id, trace_ref: summary.trace_ref ?? "", span_id: "" }]}
+              agentName={traceAgentNames(summary)[0]}
+            />
+            <CopyForAgent handoff={handoff} />
+          </div>
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
